@@ -20,9 +20,6 @@ TwoWire MPUWire = TwoWire(1);
 
 const int LED_PIN = LED_BUILTIN; 
 const int MPU_ADDR = 0x68;
-const long THRESHOLD = 12000; 
-
-int16_t prevAx, prevAy, prevAz, prevGx, prevGy, prevGz;
 
 int16_t read16() {
   uint8_t hi = MPUWire.read();
@@ -64,26 +61,33 @@ void setup() {
   }
   
   MPUWire.begin(MPU_SDA, MPU_SCL);
-MPUWire.beginTransmission(MPU_ADDR);
+  
+  // 1. Wake up the sensor
+  MPUWire.beginTransmission(MPU_ADDR);
   MPUWire.write(0x6B);
   MPUWire.write(0x00);
   MPUWire.endTransmission(true);
 
-  // Your pasted filter code:
+  // 2. Set gravity scale to +/- 4g
+  MPUWire.beginTransmission(MPU_ADDR);
+  MPUWire.write(0x1C); 
+  MPUWire.write(0x08); 
+  MPUWire.endTransmission(true);
+
+  // 3. Set Low-Pass Filter to 10 Hz
   MPUWire.beginTransmission(MPU_ADDR);
   MPUWire.write(0x1A); 
   MPUWire.write(0x05); 
   MPUWire.endTransmission(true);
 
   delay(200);
-  readSensor(prevAx, prevAy, prevAz, prevGx, prevGy, prevGz);
   
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 20);
   display.println("System Ready!");
-  display.println("Waiting for motion...");
+  display.println("Waiting for tilt...");
   display.display();
   
   Serial.println("Dual I2C Active! OLED on 18/17 | MPU on 8/9");
@@ -93,71 +97,61 @@ void loop() {
   int16_t ax, ay, az, gx, gy, gz;
   readSensor(ax, ay, az, gx, gy, gz);
 
-  long motionDelta = abs((long)ax - prevAx) + abs((long)ay - prevAy) + abs((long)az - prevAz) +
-                     abs((long)gx - prevGx) + abs((long)gy - prevGy) + abs((long)gz - prevGz);
+  // Calculate the live tilt angle in degrees
+  float tiltAngle = atan2(ay, az) * 180.0 / PI;
 
-  // Update previous readings to track continuous changes
-  prevAx = ax; prevAy = ay; prevAz = az;
-  prevGx = gx; prevGy = gy; prevGz = gz;
+  // Print resting angle to the Serial Monitor
+  Serial.print("Current Tilt: ");
+  Serial.print(tiltAngle);
+  Serial.println(" degrees");
 
-  if (motionDelta > THRESHOLD) {
+  // Trigger the timer if tilted more than 30 degrees
+  if (abs(tiltAngle) > 30.0) {
     digitalWrite(LED_PIN, HIGH);
-    Serial.println("\n--- MOTION DETECTED: STARTING 30-SECOND WINDOW ---");
-
+    Serial.println("\n--- TILT DETECTED: STARTING 30-SECOND WINDOW ---");
     unsigned long startTime = millis();
-
-    // 30-second looping window (30000 milliseconds)
+    // 30-second looping window
     while (millis() - startTime < 30000) {
       readSensor(ax, ay, az, gx, gy, gz);
-
-      // Check for CONTINUOUS motion while inside the loop
-      long currentMotionDelta = abs((long)ax - prevAx) + abs((long)ay - prevAy) + abs((long)az - prevAz) +
-                                abs((long)gx - prevGx) + abs((long)gy - prevGy) + abs((long)gz - prevGz);
-
-      if (currentMotionDelta > THRESHOLD) {
-        // Motion detected again! Reset the timer to keep the loop going.
+      // Check if container is still tilted while inside the loop
+      float currentTilt = atan2(ay, az) * 180.0 / PI;
+      if (abs(currentTilt) > 30.0) {
+        // Container is still tilted! Reset the timer.
         startTime = millis(); 
-        Serial.println("--- Motion re-triggered! Timer reset to 30s ---");
+        Serial.println("--- Container still tilted! Timer reset to 30s ---");
       }
-
-      // Update baseline for the next rapid check
-      prevAx = ax; prevAy = ay; prevAz = az;
-      prevGx = gx; prevGy = gy; prevGz = gz;
-
-      // Print to Serial
+     
+   // Print live status to Serial
+      Serial.print("Tilt: "); Serial.print(currentTilt); Serial.print(" deg | ");
       Serial.print("ACCEL [X:"); Serial.print(ax); Serial.print(" Y:"); Serial.print(ay); Serial.print(" Z:"); Serial.print(az);
       Serial.print("] | GYRO [X:"); Serial.print(gx); Serial.print(" Y:"); Serial.print(gy); Serial.print(" Z:"); Serial.print(gz);
       Serial.println("]");
-
-      // Print to OLED
+    // Print live status to OLED
       display.clearDisplay();
       display.setCursor(0, 0);
-      display.println("!! MOTION DETECTED !!");
+      display.println("!! TILT DETECTED !!");
       
-      display.print("Time Left: ");
-      display.print(30 - ((millis() - startTime) / 1000));
-      display.println("s\n");
+  display.print("Time Left: ");
+  display.print(30 - ((millis() - startTime) / 1000));
+  display.println("s\n");
+  display.print("Angle: "); 
+  display.print(currentTilt); 
+  display.println(" deg");
+  display.display();
 
-      display.print("A:"); display.print(ax); display.print(","); display.print(ay); display.print(","); display.println(az);
-      display.print("G:"); display.print(gx); display.print(","); display.print(gy); display.print(","); display.println(gz);
-      display.display();
-
-      delay(100); 
+   delay(100); 
     }
 
-    // Only reaches here if 30 full seconds pass with NO motion
+  // Runs only if 30 seconds pass with the container flat
     digitalWrite(LED_PIN, LOW);
-    Serial.println("--- 30 SECONDS COMPLETE NO MOTION. RETURNING TO SILENT STATE ---\n");
+    Serial.println("--- 30 SECONDS COMPLETE CONTAINER FLAT. RETURNING TO SILENT STATE ---\n");
     
-    // Reset OLED
+  // Reset OLED
     display.clearDisplay();
     display.setCursor(0, 20);
     display.println("System Ready!");
-    display.println("Waiting for motion...");
+    display.println("Waiting for tilt...");
     display.display();
-    
-    // Re-sync baseline before returning to main loop
-    readSensor(prevAx, prevAy, prevAz, prevGx, prevGy, prevGz);
   }
 
   delay(50);
